@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WeChat Telecom Bridge</string>
+    <string name="accessibility_service_description">只读取微信来电浮窗状态，用于同步手表响铃；不会点击、接听或控制微信。</string>
+</resources>

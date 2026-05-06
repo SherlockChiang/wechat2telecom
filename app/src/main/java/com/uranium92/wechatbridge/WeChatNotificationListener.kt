@@ -1,53 +1,40 @@
 package com.uranium92.wechatbridge
 
 import android.app.Notification
-import android.content.ComponentName
-import android.content.Context
-import android.net.Uri
-import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import android.telecom.PhoneAccountHandle
-import android.telecom.TelecomManager
+import android.telecom.DisconnectCause
 import android.util.Log
 
 class WeChatNotificationListener : NotificationListenerService() {
-
-    private val TAG = "WeChatBridge"
-    private var isCalling = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
         if (sbn?.packageName != "com.tencent.mm") return
 
-        val notification = sbn.notification
-        val extras = notification.extras
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+        val extras = sbn.notification.extras
         val text = extras.getString(Notification.EXTRA_TEXT) ?: ""
-        val flags = notification.flags
+        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
 
-        // 1. 识别呼叫 (触发系统响铃)
-        if (text.contains("邀请你语音通话") || text.contains("邀请你视频通话")) {
-            if (!isCalling) {
-                isCalling = true
-                val callerName = text.replace("邀请你语音通话", "").replace("邀请你视频通话", "")
-                Log.d(TAG, "🔔 [触发响铃] 微信来电: $callerName")
-                triggerTelecomCall(callerName)
+        Log.d(TAG, "📩 通知: title=$title text=$text")
+
+        when {
+            isIncomingInvite(text) -> {
+                WeChatCallCoordinator.beginRinging(
+                    this,
+                    extractCallerName(title, text),
+                    "notification"
+                )
             }
-        }
-
-        // 2. 识别“已在手机端接听” (停止手表响铃)
-        // 解析 Flags: 如果包含 64 (FLAG_FOREGROUND_SERVICE)，说明微信已占用了麦克风，通话已经接通！
-        if (isCalling && text == "语音通话中" && (flags and Notification.FLAG_FOREGROUND_SERVICE) != 0) {
-            Log.d(TAG, "📞 [拦截成功] 识别到你在手机端接听了电话，强制停止系统响铃")
-            endTelecomCall()
-        }
-
-        // 3. 识别未接来电消息 (停止手表响铃)
-        // 比如收到 "[2条]姜宇涵: [语音通话]"
-        if (isCalling && (text.contains("[语音通话]") || text.contains("[视频通话]"))) {
-            Log.d(TAG, "📴 [识别到未接] 对方已挂断，强制停止系统响铃")
-            endTelecomCall()
+            WeChatCallCoordinator.isRinging() && isActiveCall(text) -> {
+                WeChatCallCoordinator.endCall(DisconnectCause.LOCAL, "notification-active")
+            }
+            WeChatCallCoordinator.isRinging() && isEndedMessage(text) -> {
+                WeChatCallCoordinator.endCall(DisconnectCause.REMOTE, "notification-ended")
+            }
         }
     }
 
@@ -55,42 +42,65 @@ class WeChatNotificationListener : NotificationListenerService() {
         super.onNotificationRemoved(sbn)
         if (sbn?.packageName != "com.tencent.mm") return
 
-        val removedText = sbn.notification.extras.getString(Notification.EXTRA_TEXT) ?: ""
-
-        // 4. 彻底挂断生命周期 (停止手表响铃)
-        // 无论何种情况，只要这根“独苗”常驻通知消失了，就意味着一切结束
-        if (removedText == "语音通话中" && isCalling) {
-            Log.d(TAG, "📴 [通话彻底结束] 常驻通知消失，销毁系统来电")
-            endTelecomCall()
+        val text = sbn.notification.extras.getString(Notification.EXTRA_TEXT) ?: ""
+        if (WeChatCallCoordinator.isRinging() && isIncomingInvite(text)) {
+            Log.d(TAG, "↩️ 响铃通知移除，延迟确认是否为来电取消")
+            scheduleRemovedConfirmation()
         }
     }
 
-    private fun endTelecomCall() {
-        CallBridge.activeConnection?.let { conn ->
-            conn.setDisconnected(android.telecom.DisconnectCause(android.telecom.DisconnectCause.REMOTE))
-            conn.destroy()
-        }
-        isCalling = false
-        CallBridge.activeConnection = null
+    private fun scheduleRemovedConfirmation() {
+        mainHandler.postDelayed({
+            if (!WeChatCallCoordinator.isRinging()) return@postDelayed
+
+            val callerName = WeChatCallCoordinator.lastCallerName()
+            val hasRelatedNotification = activeNotifications
+                .filter { it.packageName == "com.tencent.mm" }
+                .any {
+                    val extras = it.notification.extras
+                    val text = extras.getString(Notification.EXTRA_TEXT) ?: ""
+                    val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+                    isIncomingInvite(text) || isActiveCall(text) ||
+                        title.contains(callerName) || text.contains(callerName)
+                }
+
+            if (hasRelatedNotification) {
+                Log.d(TAG, "↩️ 微信仍有相关通知，继续保持手表端响铃")
+            } else {
+                Log.d(TAG, "📴 [ENDED] 未发现相关活跃通知，判定来电已取消")
+                WeChatCallCoordinator.endCall(DisconnectCause.MISSED, "notification-removed")
+            }
+        }, REMOVED_CONFIRMATION_DELAY_MS)
     }
 
-    private fun triggerTelecomCall(callerName: String) {
-        val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-        val componentName = ComponentName(this, WeChatConnectionService::class.java)
-        val phoneAccountHandle = PhoneAccountHandle(componentName, "WeChatBridgeAccount")
+    private fun isIncomingInvite(text: String): Boolean {
+        return text.contains("邀请你语音通话") || text.contains("邀请你视频通话") ||
+            text.contains("邀请你通话") || text.contains("微信电话")
+    }
 
-        val extras = Bundle().apply {
-            putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, phoneAccountHandle)
-            val uri = Uri.fromParts("tel", "WeChat", null)
-            putParcelable(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS, uri)
-            putString(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS, "微信来电: $callerName")
-        }
+    private fun isActiveCall(text: String): Boolean {
+        return text.contains("语音通话中") || text.contains("视频通话中") ||
+            text.contains("通话中")
+    }
 
-        try {
-            telecomManager.addNewIncomingCall(phoneAccountHandle, extras)
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ 无法调起系统通话: ${e.message}")
-            isCalling = false
-        }
+    private fun isEndedMessage(text: String): Boolean {
+        return text.contains("[语音通话]") || text.contains("[视频通话]") ||
+            text.contains("未接") || text.contains("已取消") ||
+            text.contains("已拒绝") || text.contains("通话时长")
+    }
+
+    private fun extractCallerName(title: String, text: String): String {
+        return title.takeIf { it.isNotBlank() }
+            ?: text.replace("邀请你语音通话", "")
+                .replace("邀请你视频通话", "")
+                .replace("邀请你通话", "")
+                .replace("微信电话", "")
+                .trim()
+                .ifBlank { "微信来电" }
+    }
+
+    companion object {
+        private const val TAG = "WeChatBridge"
+        private const val REMOVED_CONFIRMATION_DELAY_MS = 3_500L
     }
 }

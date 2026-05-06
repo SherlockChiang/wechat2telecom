@@ -1,62 +1,102 @@
 package com.uranium92.wechatbridge
 
 import android.app.Activity
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
-import android.telecom.PhoneAccount
-import android.telecom.PhoneAccountHandle
-import android.telecom.TelecomManager
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
-import android.net.Uri
 
 class MainActivity : Activity() {
+    private lateinit var statusView: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1. 注册 Telecom 账户 (虚拟运营商牌照)
-        registerPhoneAccount()
+        BridgeInitializer.initialize(this)
 
-        // 2. 原有的强制唤醒逻辑
-        try {
-            val componentName = ComponentName(this, WeChatNotificationListener::class.java)
-            packageManager.setComponentEnabledSetting(componentName, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
-            packageManager.setComponentEnabledSetting(componentName, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
-        } catch (e: Exception) {}
-
-        // 3. 权限检查
+        buildUi()
         checkPermissions()
-    }
-
-    private fun registerPhoneAccount() {
-        val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-        val componentName = ComponentName(this, WeChatConnectionService::class.java)
-        
-        // 创建一个唯一的账户 ID
-        val phoneAccountHandle = PhoneAccountHandle(componentName, "WeChatBridgeAccount")
-
-        val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "WeChat Bridge")
-            .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER) // 声明它是通话提供者
-            .setIcon(android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_menu_call))
-            .build()
-
-        telecomManager.registerPhoneAccount(phoneAccount)
-
-        // 检查账户是否已启用 (某些系统如小米需要用户手动在拨号设置里开启，但我们先尝试代码检查)
-        val intent = Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS)
-        Toast.makeText(this, "如果未激活，请在通话设置中开启 WeChat Bridge", Toast.LENGTH_LONG).show()
     }
 
     private fun checkPermissions() {
         val enabled = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
+        updateStatus(enabled)
         if (!enabled) {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         } else {
             Toast.makeText(this, "服务运行中", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun buildUi() {
+        val padding = (20 * resources.displayMetrics.density).toInt()
+        val gap = (12 * resources.displayMetrics.density).toInt()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, padding)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val title = TextView(this).apply {
+            text = "WeChat Telecom Bridge"
+            textSize = 22f
+        }
+        root.addView(title)
+
+        statusView = TextView(this).apply {
+            textSize = 15f
+            setPadding(0, gap, 0, gap)
+        }
+        root.addView(statusView)
+
+        val modeView = TextView(this).apply {
+            text = "模式：只监听微信通知并同步响铃，不控制微信接听或挂断。"
+            textSize = 16f
+            setPadding(0, 0, 0, gap)
+        }
+        root.addView(modeView)
+
+        val notificationButton = Button(this).apply {
+            text = "打开通知监听设置"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }
+        }
+        root.addView(notificationButton)
+
+        val accessibilityButton = Button(this).apply {
+            text = "打开无障碍浮窗监听设置"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }
+        root.addView(accessibilityButton)
+
+        setContentView(root)
+    }
+
+    private fun updateStatus(notificationListenerEnabled: Boolean) {
+        statusView.text = if (notificationListenerEnabled) {
+            "通知监听已开启。当前模式：只监听同步响铃。"
+        } else {
+            "通知监听未开启，请先授权后再测试微信来电。"
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::statusView.isInitialized) {
+            val enabled = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
+            updateStatus(enabled)
         }
     }
 }

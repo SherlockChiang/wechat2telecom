@@ -11,13 +11,14 @@ android {
         applicationId = "com.uranium92.wechatbridge"
         minSdk = 28 // Android 9，足以支持 NotificationListener 和 Telecom 框架
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -35,6 +36,4 @@ android {
 dependencies {
     // 基础核心库
     implementation("androidx.core:core-ktx:1.12.0")
-    
-    // 因为我们目前没有 UI，所以不需要引入 Material Design 或 Compose 的依赖
 }
